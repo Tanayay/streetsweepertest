@@ -13,15 +13,9 @@ if (-not (Test-Path '.venv\Scripts\python.exe')) {
 }
 
 $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
-$stamp = Join-Path $PSScriptRoot '.venv\.dependencies-installed'
+Write-Host 'Checking required packages...'
+& $python -m pip install -r requirements.txt --disable-pip-version-check
 
-if (-not (Test-Path $stamp)) {
-    Write-Host 'Installing dependencies. This only happens the first time...'
-    & $python -m pip install --upgrade pip setuptools wheel
-    & $python -m pip install -r requirements.txt
-    New-Item -ItemType File -Path $stamp -Force | Out-Null
-}
-
-Write-Host 'Starting ParkLink Street Sweeper Counter...' -ForegroundColor Cyan
+Write-Host 'Starting ParkLink Road Obstruction Detector...' -ForegroundColor Cyan
 Start-Process 'http://127.0.0.1:5000'
 & $python app.py
