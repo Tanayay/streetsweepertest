@@ -39,12 +39,12 @@
   <p class="sub">Click, drag, or paste a street image with Ctrl+V. The detector marks visible cars, trucks, buses, and motorcycles and returns a total.</p>
 
   <section class="card">
-    <form id="form">
+    <form id="form" novalidate>
       <label class="drop" id="dropZone" for="imageInput" tabindex="0">
         <strong id="fileLabel">Click, drop, or paste a street image</strong><br>
         <span style="color:#8fa8c2">JPG, PNG, or WEBP · maximum 15 MB · Ctrl+V supported</span>
       </label>
-      <input id="imageInput" name="image" type="file" accept="image/jpeg,image/png,image/webp" required>
+      <input id="imageInput" name="image" type="file" accept="image/jpeg,image/png,image/webp">
       <img id="preview" alt="Selected street image preview" hidden>
 
       <div class="controls">
@@ -154,7 +154,7 @@
       let data = {};
       try { data = raw ? JSON.parse(raw) : {}; } catch (_) {}
       if (!response.ok) throw new Error(data.error || `Detection failed (${response.status}).`);
-      if (!data.annotated_image) throw new Error('The server stopped before finishing. Try once more; the free server may still be loading the model.');
+      if (!data.annotated_image) throw new Error('The server stopped before finishing. Try again.');
 
       document.getElementById('count').textContent = data.count;
       document.getElementById('resultImage').src = data.annotated_image;
