@@ -8,7 +8,7 @@ from flask import Flask, jsonify, render_template, request
 from PIL import Image, UnidentifiedImageError
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
@@ -21,55 +21,92 @@ def image_to_data_url(image: Image.Image) -> str:
 
 def read_image(uploaded):
     if uploaded is None or uploaded.filename == "":
-        raise ValueError("Both a clear-road reference and a current image are required.")
+        raise ValueError("Choose or paste a street image first.")
     if uploaded.mimetype not in ALLOWED_TYPES:
-        raise ValueError("Use JPG, PNG, or WEBP images.")
+        raise ValueError("Use a JPG, PNG, or WEBP image.")
     try:
         return Image.open(uploaded.stream).convert("RGB")
     except UnidentifiedImageError as exc:
-        raise ValueError("One of the files is not a readable image.") from exc
+        raise ValueError("That file is not a readable image.") from exc
 
 
-def detect_obstructions(reference: Image.Image, current: Image.Image, sensitivity: int, min_area_percent: float):
-    current = current.resize(reference.size, Image.Resampling.LANCZOS)
-    ref = cv2.cvtColor(np.array(reference), cv2.COLOR_RGB2BGR)
-    cur = cv2.cvtColor(np.array(current), cv2.COLOR_RGB2BGR)
+def detect_interference(image: Image.Image, sensitivity: int, min_area_percent: float):
+    rgb = np.array(image)
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    h, w = bgr.shape[:2]
 
-    ref_blur = cv2.GaussianBlur(ref, (11, 11), 0)
-    cur_blur = cv2.GaussianBlur(cur, (11, 11), 0)
-    diff = cv2.absdiff(ref_blur, cur_blur)
-    gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
-    _, mask = cv2.threshold(gray, sensitivity, 255, cv2.THRESH_BINARY)
+    # Assume the useful road region is mostly in the lower 85% of the frame.
+    roi_mask = np.zeros((h, w), dtype=np.uint8)
+    roi_mask[int(h * 0.15):, :] = 255
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (9, 9), 0)
+
+    # Road is usually low-saturation and relatively smooth. Objects tend to add
+    # stronger color, edges, and local contrast.
+    saturation = hsv[:, :, 1]
+    color_mask = cv2.inRange(saturation, max(20, 85 - sensitivity), 255)
+
+    local_average = cv2.GaussianBlur(blurred, (0, 0), 18)
+    local_difference = cv2.absdiff(blurred, local_average)
+    _, contrast_mask = cv2.threshold(
+        local_difference,
+        max(8, 35 - sensitivity // 3),
+        255,
+        cv2.THRESH_BINARY,
+    )
+
+    edges = cv2.Canny(blurred, max(20, 90 - sensitivity), max(60, 190 - sensitivity))
+    edges = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=1)
+
+    mask = cv2.bitwise_or(color_mask, contrast_mask)
+    mask = cv2.bitwise_or(mask, edges)
+    mask = cv2.bitwise_and(mask, roi_mask)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-    mask = cv2.dilate(mask, kernel, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.dilate(mask, kernel, iterations=1)
 
-    image_area = reference.width * reference.height
+    image_area = w * h
     minimum_area = image_area * min_area_percent / 100.0
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+    output = bgr.copy()
     boxes = []
-    output = cur.copy()
-    changed_area = 0
+    total_area = 0.0
+
     for contour in contours:
         area = cv2.contourArea(contour)
         if area < minimum_area:
             continue
-        x, y, w, h = cv2.boundingRect(contour)
-        boxes.append([x, y, x + w, y + h])
-        changed_area += area
-        cv2.rectangle(output, (x, y), (x + w, y + h), (0, 0, 255), max(2, reference.width // 350))
-        cv2.putText(output, "OBSTRUCTION", (x, max(24, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
+        x, y, bw, bh = cv2.boundingRect(contour)
+
+        # Ignore very thin lines that are likely lane markings or image borders.
+        if bw < w * 0.03 or bh < h * 0.03:
+            continue
+
+        boxes.append([x, y, x + bw, y + bh])
+        total_area += area
+        cv2.rectangle(output, (x, y), (x + bw, y + bh), (0, 0, 255), max(2, w // 350))
+        cv2.putText(
+            output,
+            "INTERFERENCE",
+            (x, max(26, y - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 0, 255),
+            2,
+        )
 
     overlay = output.copy()
     overlay[mask > 0] = (0, 70, 255)
-    output = cv2.addWeighted(output, 0.78, overlay, 0.22, 0)
+    output = cv2.addWeighted(output, 0.82, overlay, 0.18, 0)
     output_rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
 
-    changed_percent = round((changed_area / image_area) * 100, 2)
-    return Image.fromarray(output_rgb), boxes, changed_percent
+    covered_percent = round((total_area / image_area) * 100, 2)
+    return Image.fromarray(output_rgb), boxes, covered_percent
 
 
 @app.get("/")
@@ -85,32 +122,29 @@ def health():
 @app.post("/detect")
 def detect():
     try:
-        reference = read_image(request.files.get("reference"))
-        current = read_image(request.files.get("current"))
-        sensitivity = int(request.form.get("sensitivity", "35"))
-        sensitivity = min(max(sensitivity, 10), 100)
-        min_area = float(request.form.get("min_area", "0.35"))
-        min_area = min(max(min_area, 0.05), 10.0)
-        annotated, boxes, changed_percent = detect_obstructions(reference, current, sensitivity, min_area)
+        image = read_image(request.files.get("image"))
+        sensitivity = min(max(int(request.form.get("sensitivity", "55")), 10), 90)
+        min_area = min(max(float(request.form.get("min_area", "0.45")), 0.05), 10.0)
+        annotated, boxes, covered_percent = detect_interference(image, sensitivity, min_area)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
-        app.logger.exception("Obstruction detection failed")
+        app.logger.exception("Road interference detection failed")
         return jsonify({"error": f"Detection failed: {exc}"}), 500
 
     return jsonify({
         "count": len(boxes),
         "status": "BLOCKED" if boxes else "CLEAR",
-        "changed_percent": changed_percent,
+        "covered_percent": covered_percent,
         "boxes": boxes,
         "annotated_image": image_to_data_url(annotated),
-        "note": "Red regions are large visual changes compared with the clear-road reference. Best results require the same fixed camera position.",
+        "note": "Single-image experimental mode: red areas are large non-road-like regions. Shadows, markings, sidewalks, and unusual pavement can still create false detections.",
     })
 
 
 @app.errorhandler(413)
 def too_large(_error):
-    return jsonify({"error": "Combined upload is too large. Maximum size is 30 MB."}), 413
+    return jsonify({"error": "Image is too large. Maximum size is 20 MB."}), 413
 
 
 if __name__ == "__main__":
